@@ -522,8 +522,27 @@ class PowerShellComplete(ShellComplete):
     name: t.ClassVar[str] = "powershell"
     source_template: t.ClassVar[str] = _SOURCE_POWERSHELL
 
+    def source_vars(self) -> _SourceVarsDict:
+        """Quote ``prog_name`` as a PowerShell single-quoted string, so a
+        program name that contains a space or a quote stays one word in
+        the generated script.
+        """
+        data = super().source_vars()
+        data["prog_name"] = _quote_powershell_string(data["prog_name"])
+        return data
+
     def get_completion_args(self) -> tuple[list[str], str]:
-        cwords = split_arg_string(os.environ["COMP_WORDS"])
+        """Split ``COMP_WORDS``, the command line that PowerShell parsed.
+
+        The split uses the PowerShell rules, not the POSIX rules of
+        :func:`split_arg_string`. A backslash is a normal character, so an
+        unquoted path such as ``C:\\Users\\click`` keeps its backslashes.
+        ``COMP_CWORD`` is the number of elements that PowerShell counted, so
+        the split must give the same number of tokens. A single quote
+        delimits a string, as it does in PowerShell, so
+        ``'C:\\My Files\\a.toml'`` is one token.
+        """
+        cwords = _split_powershell_arg_string(os.environ["COMP_WORDS"])
         cword = int(os.environ["COMP_CWORD"])
         args = cwords[1:cword]
 
@@ -629,6 +648,128 @@ def split_arg_string(string: str) -> list[str]:
         out.append(lex.token)
 
     return out
+
+
+# Characters that follow a backtick in PowerShell and stand for a control
+# character. A backtick before any other character makes it literal.
+_POWERSHELL_ESCAPES: t.Final[dict[str, str]] = {
+    "0": "\0",
+    "a": "\a",
+    "b": "\b",
+    "e": "\x1b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+}
+
+
+def _split_powershell_arg_string(string: str) -> list[str]:
+    """Split a PowerShell command line the way PowerShell splits the
+    elements of a command, and don't fail if the string is incomplete.
+
+    -   A backslash is a normal character, so ``C:\\Temp\\a`` is one token
+        and keeps its backslashes.
+    -   A backtick escapes the next character outside single quotes. A
+        trailing backtick is ignored.
+    -   A single-quoted string is literal, and ``''`` inside it is one
+        single quote.
+    -   A double-quoted string keeps its spaces, and ``""`` inside it is
+        one double quote. Variables are not expanded.
+    -   A token that starts with a quote ends at the closing quote, so
+        ``'a'b`` is two tokens, as in PowerShell. A quote inside a bare
+        word joins the quoted text to the word, so ``a'b c'`` is one token.
+    -   A missing closing quote uses the partial token as-is, like
+        :func:`split_arg_string`.
+
+    :param string: String to split.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(string)
+
+    while i < n:
+        if string[i].isspace():
+            i += 1
+            continue
+
+        token: list[str] = []
+        starts_quoted = string[i] in "'\""
+
+        while i < n and not string[i].isspace():
+            c = string[i]
+
+            if c == "`":
+                if i + 1 < n:
+                    nxt = string[i + 1]
+                    token.append(_POWERSHELL_ESCAPES.get(nxt, nxt))
+
+                i += 2
+            elif c == "'":
+                i += 1
+
+                while i < n:
+                    if string[i] == "'":
+                        if i + 1 < n and string[i + 1] == "'":
+                            token.append("'")
+                            i += 2
+                            continue
+
+                        i += 1
+                        break
+
+                    token.append(string[i])
+                    i += 1
+            elif c == '"':
+                i += 1
+
+                while i < n:
+                    q = string[i]
+
+                    if q == "`":
+                        if i + 1 < n:
+                            nxt = string[i + 1]
+                            token.append(_POWERSHELL_ESCAPES.get(nxt, nxt))
+
+                        i += 2
+                    elif q == '"':
+                        if i + 1 < n and string[i + 1] == '"':
+                            token.append('"')
+                            i += 2
+                            continue
+
+                        i += 1
+                        break
+                    else:
+                        token.append(q)
+                        i += 1
+            else:
+                token.append(c)
+                i += 1
+
+            if starts_quoted:
+                # A string literal is a complete element. Text right
+                # after the closing quote starts the next element.
+                break
+
+        out.append("".join(token))
+
+    return out
+
+
+def _quote_powershell_string(value: str) -> str:
+    """Quote a value as a PowerShell single-quoted string. PowerShell reads
+    every character in it literally, except a single quote, which is
+    doubled. PowerShell also treats the typographic single quotes as quote
+    characters, so they are doubled too.
+
+    :param value: Value to quote.
+    """
+    for c in "'\u2018\u2019\u201a\u201b":
+        value = value.replace(c, c * 2)
+
+    return f"'{value}'"
 
 
 def _is_incomplete_argument(ctx: Context, param: Parameter) -> bool:

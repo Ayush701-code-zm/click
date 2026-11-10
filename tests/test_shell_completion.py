@@ -391,6 +391,94 @@ def test_full_complete(runner, shell, env, expect):
     assert result.output == expect
 
 
+@pytest.mark.parametrize(
+    ("value", "expect"),
+    [
+        pytest.param("", [], id="empty"),
+        pytest.param("cli a b", ["cli", "a", "b"], id="words"),
+        pytest.param(
+            r"cli sub C:\Users\ann\doc",
+            ["cli", "sub", r"C:\Users\ann\doc"],
+            id="unquoted backslashes",
+        ),
+        pytest.param(
+            "cli sub C:\\Temp\\\\",
+            ["cli", "sub", "C:\\Temp\\\\"],
+            id="trailing backslashes",
+        ),
+        pytest.param(
+            r"cli 'C:\My Files\a.toml' b",
+            ["cli", r"C:\My Files\a.toml", "b"],
+            id="single-quoted path with space",
+        ),
+        pytest.param(
+            r'cli "C:\My Files\a.toml" b',
+            ["cli", r"C:\My Files\a.toml", "b"],
+            id="double-quoted path with space",
+        ),
+        pytest.param("cli 'it''s'", ["cli", "it's"], id="doubled single quote"),
+        pytest.param('cli "a""b"', ["cli", 'a"b'], id="doubled double quote"),
+        pytest.param('cli "a`"b"', ["cli", 'a"b'], id="backtick in double quotes"),
+        pytest.param("cli a` b", ["cli", "a b"], id="backtick escapes space"),
+        pytest.param("cli a`tb", ["cli", "a\tb"], id="backtick special char"),
+        pytest.param("cli ''", ["cli", ""], id="empty string"),
+        pytest.param("cli 'a'b", ["cli", "a", "b"], id="quoted string then word"),
+        pytest.param("cli a'b c'", ["cli", "ab c"], id="word then quoted string"),
+        pytest.param(r"cli 'C:\My Files", ["cli", r"C:\My Files"], id="unclosed quote"),
+        pytest.param("cli a`", ["cli", "a"], id="trailing backtick"),
+    ],
+)
+def test_split_powershell_arg_string(value, expect):
+    split = click.shell_completion._split_powershell_arg_string
+    assert split(value) == expect
+
+
+@pytest.mark.parametrize(
+    ("words", "cword", "expect"),
+    [
+        pytest.param(
+            r"cli sub C:\Users\ann\doc",
+            "2",
+            (["sub"], r"C:\Users\ann\doc"),
+            id="incomplete path",
+        ),
+        pytest.param(
+            r"cli 'C:\My Files\a.toml' ",
+            "2",
+            ([r"C:\My Files\a.toml"], ""),
+            id="token count matches COMP_CWORD",
+        ),
+        pytest.param(
+            "cli C:\\Temp\\ x",
+            "2",
+            (["C:\\Temp\\"], "x"),
+            id="args keep backslashes",
+        ),
+    ],
+)
+def test_powershell_completion_args(monkeypatch, words, cword, expect):
+    monkeypatch.setenv("COMP_WORDS", words)
+    monkeypatch.setenv("COMP_CWORD", cword)
+    pc = PowerShellComplete(Command("cli"), {}, "cli", "_CLI_COMPLETE")
+    assert pc.get_completion_args() == expect
+
+
+@pytest.mark.parametrize(
+    ("prog_name", "quoted"),
+    [
+        ("cli", "'cli'"),
+        ("my cli", "'my cli'"),
+        ("it's", "'it''s'"),
+        ("it\u2019s", "'it\u2019\u2019s'"),
+    ],
+)
+def test_powershell_source_quotes_prog_name(prog_name, quoted):
+    pc = PowerShellComplete(Command("cli"), {}, prog_name, "_CLI_COMPLETE")
+    source = pc.source()
+    assert f"-CommandName {quoted} -ScriptBlock" in source
+    assert f"& {quoted} 2>$null" in source
+
+
 def test_source_uses_lf_line_endings(monkeypatch):
     stdout = io.BytesIO()
     stream = io.TextIOWrapper(stdout, encoding="utf-8", newline="\r\n")
